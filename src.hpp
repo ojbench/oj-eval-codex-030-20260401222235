@@ -3,9 +3,13 @@
 // and returns an integer 0..9 predicting the digit.
 // Heuristic approach using simple geometric and topological features.
 
-#include <bits/stdc++.h>
+#include <vector>
+#include <queue>
+#include <algorithm>
+#include <cmath>
+#include <utility>
 
-typedef std::vector<std::vector<double>> IMAGE_T;
+typedef std::vector< std::vector<double> > IMAGE_T;
 
 namespace nr_heur {
 
@@ -14,20 +18,44 @@ static inline int W() { return 28; }
 
 static inline bool inb(int r, int c) { return r>=0 && r<H() && c>=0 && c<W(); }
 
+// C++03-compatible BFS helper at namespace scope
+static std::pair<int,bool> bfs_func(const IMAGE_T &bimg, std::vector< std::vector<int> > &vism,
+                                    int sr, int sc, int target, int RR, int CC){
+    static const int dr[4]={1,-1,0,0};
+    static const int dc[4]={0,0,1,-1};
+    std::queue< std::pair<int,int> > q;
+    q.push(std::make_pair(sr,sc));
+    vism[sr][sc]=1; int cnt=0; bool touches_border=false;
+    while(!q.empty()){
+        std::pair<int,int> pr = q.front(); q.pop(); int r=pr.first, c=pr.second; cnt++;
+        if (r==0||c==0||r==RR-1||c==CC-1) touches_border=true;
+        for (int k=0;k<4;++k){ int nr=r+dr[k], nc=c+dc[k]; if (nr>=0&&nr<RR&&nc>=0&&nc<CC && !vism[nr][nc]){
+            if (target==0 && bimg[nr][nc]<0.5) { vism[nr][nc]=1; q.push(std::make_pair(nr,nc)); }
+            if (target==1 && bimg[nr][nc]>0.5) { vism[nr][nc]=1; q.push(std::make_pair(nr,nc)); }
+        }}
+    }
+    return std::make_pair(cnt,touches_border);
+}
+
 struct Feat {
-    int rows=28, cols=28;
-    int pixels=0;                 // foreground count
-    int bbox_r0=28, bbox_c0=28, bbox_r1=-1, bbox_c1=-1;
-    double aspect=1.0;            // bbox aspect ratio
-    int vert_strokes=0;           // vertical stroke count by column clustering
-    int horiz_strokes=0;          // horizontal strokes by row clustering
-    bool has_hole=false;          // contains enclosed hole
-    int euler=0;                  // Euler characteristic (#components - #holes)
-    int top_heavy=0;              // mass more top than bottom
-    int left_heavy=0;             // mass more left than right
-    int right_heavy=0;            // mass more right than left
-    double v_sym=0.0;             // vertical symmetry score (higher better)
-    double h_sym=0.0;             // horizontal symmetry score
+    int rows, cols;
+    int pixels;                   // foreground count
+    int bbox_r0, bbox_c0, bbox_r1, bbox_c1;
+    double aspect;                // bbox aspect ratio
+    int vert_strokes;             // vertical stroke count by column clustering
+    int horiz_strokes;            // horizontal strokes by row clustering
+    bool has_hole;                // contains enclosed hole
+    int euler;                    // Euler characteristic (#components - #holes)
+    int top_heavy;                // mass more top than bottom
+    int left_heavy;               // mass more left than right
+    int right_heavy;              // mass more right than left
+    double v_sym;                 // vertical symmetry score (higher better)
+    double h_sym;                 // horizontal symmetry score
+    Feat(): rows(28), cols(28), pixels(0),
+            bbox_r0(28), bbox_c0(28), bbox_r1(-1), bbox_c1(-1),
+            aspect(1.0), vert_strokes(0), horiz_strokes(0),
+            has_hole(false), euler(0), top_heavy(0), left_heavy(0), right_heavy(0),
+            v_sym(0.0), h_sym(0.0) {}
 };
 
 static IMAGE_T binarize(const IMAGE_T &img, double thr=0.5) {
@@ -67,17 +95,16 @@ static Feat compute_feat(const IMAGE_T &img_in) {
     }
 
     // Symmetry scores
-    auto symmetry = [&](bool vertical){
-        int cnt=0; int same=0;
-        if (vertical) {
-            for (int i=0;i<R;++i) for (int j=0;j<C/2;++j){ cnt++; if (b[i][j]==b[i][C-1-j]) same++; }
-        } else {
-            for (int i=0;i<R/2;++i) for (int j=0;j<C;++j){ cnt++; if (b[i][j]==b[R-1-i][j]) same++; }
-        }
-        return cnt? (double)same/cnt : 0.0;
-    };
-    f.v_sym = symmetry(true);
-    f.h_sym = symmetry(false);
+    {
+        int cnt=0, same=0;
+        for (int i=0;i<R;++i) for (int j=0;j<C/2;++j){ cnt++; if (b[i][j]==b[i][C-1-j]) same++; }
+        f.v_sym = cnt? (double)same/cnt : 0.0;
+    }
+    {
+        int cnt=0, same=0;
+        for (int i=0;i<R/2;++i) for (int j=0;j<C;++j){ cnt++; if (b[i][j]==b[R-1-i][j]) same++; }
+        f.h_sym = cnt? (double)same/cnt : 0.0;
+    }
 
     // Mass distribution
     long long top=0,bottom=0,left=0,right=0;
@@ -90,51 +117,38 @@ static Feat compute_feat(const IMAGE_T &img_in) {
     f.right_heavy = (right>left) ? 1 : ((right<left)?-1:0);
 
     // Stroke counts by simple run-length per column/row inside bbox
-    auto count_strokes_cols = [&](){
-        int strokes=0; bool in=false;
+    // Count strokes via simple run-length in bbox
+    int v_strokes=0; {
+        bool in=false;
         for (int j=f.bbox_c0;j<=f.bbox_c1;++j){
             int colsum=0;
             for (int i=f.bbox_r0;i<=f.bbox_r1;++i) if (b[i][j]>0.5) colsum++;
-            bool now = colsum > (f.bbox_r1-f.bbox_r0+1)*0.2; // consider significant ink
-            if (now && !in){ strokes++; in=true; }
+            bool now = colsum > (int)((f.bbox_r1-f.bbox_r0+1)*0.2);
+            if (now && !in){ v_strokes++; in=true; }
             if (!now) in=false;
         }
-        return strokes;
-    };
-    auto count_strokes_rows = [&](){
-        int strokes=0; bool in=false;
+    }
+    int h_strokes=0; {
+        bool in=false;
         for (int i=f.bbox_r0;i<=f.bbox_r1;++i){
             int rowsum=0;
             for (int j=f.bbox_c0;j<=f.bbox_c1;++j) if (b[i][j]>0.5) rowsum++;
-            bool now = rowsum > (f.bbox_c1-f.bbox_c0+1)*0.2;
-            if (now && !in){ strokes++; in=true; }
+            bool now = rowsum > (int)((f.bbox_c1-f.bbox_c0+1)*0.2);
+            if (now && !in){ h_strokes++; in=true; }
             if (!now) in=false;
         }
-        return strokes;
-    };
-    f.vert_strokes = count_strokes_cols();
-    f.horiz_strokes = count_strokes_rows();
+    }
+    f.vert_strokes = v_strokes;
+    f.horiz_strokes = h_strokes;
 
     // Connectivity and holes via flood fill on background within bbox padding
-    std::vector<std::vector<int>> vis(R, std::vector<int>(C,0));
-    auto bfs = [&](int sr,int sc,int target){
-        std::queue<std::pair<int,int>>q; q.push({sr,sc}); vis[sr][sc]=1; int cnt=0; bool touches_border=false;
-        while(!q.empty()){
-            auto [r,c]=q.front(); q.pop(); cnt++;
-            if (r==0||c==0||r==R-1||c==C-1) touches_border=true;
-            const int dr[4]={1,-1,0,0}; const int dc[4]={0,0,1,-1};
-            for (int k=0;k<4;++k){ int nr=r+dr[k], nc=c+dc[k]; if (inb(nr,nc)&&!vis[nr][nc]){
-                if (target==0 && b[nr][nc]<0.5) { vis[nr][nc]=1; q.push({nr,nc}); }
-                if (target==1 && b[nr][nc]>0.5) { vis[nr][nc]=1; q.push({nr,nc}); }
-            }}
-        }
-        return std::make_pair(cnt,touches_border);
-    };
+    std::vector< std::vector<int> > vis(R, std::vector<int>(C,0));
+    std::pair<int,bool> bfs_res;
     // Count foreground components
-    int comp=0; for (int i=0;i<R;++i) for (int j=0;j<C;++j) if (!vis[i][j] && b[i][j]>0.5){ bfs(i,j,1); comp++; }
+    int comp=0; for (int i=0;i<R;++i) for (int j=0;j<C;++j) if (!vis[i][j] && b[i][j]>0.5){ bfs_res=bfs_func(b,vis,i,j,1,R,C); (void)bfs_res; comp++; }
     // Reset vis and find background components that are enclosed (holes)
     for (int i=0;i<R;++i) for (int j=0;j<C;++j) vis[i][j]=0;
-    int holes=0; for (int i=0;i<R;++i) for (int j=0;j<C;++j) if (!vis[i][j] && b[i][j]<0.5){ auto pr=bfs(i,j,0); if (!pr.second) holes++; }
+    int holes=0; for (int i=0;i<R;++i) for (int j=0;j<C;++j) if (!vis[i][j] && b[i][j]<0.5){ std::pair<int,bool> pr=bfs_func(b,vis,i,j,0,R,C); if (!pr.second) holes++; }
     f.has_hole = (holes>0);
     f.euler = comp - holes;
 
@@ -199,12 +213,12 @@ int judge(IMAGE_T &img) {
     IMAGE_T norm(28, std::vector<double>(28,1.0));
     for (int i=0;i<28;++i){
         for (int j=0;j<28;++j){
-            int si = std::min(R-1, (int)std::round((double)i*(R-1)/27.0));
-            int sj = std::min(C-1, (int)std::round((double)j*(C-1)/27.0));
+            int si = (int)((double)i*(R-1)/27.0 + 0.5); if (si<0) si=0; if (si>R-1) si=R-1;
+            int sj = (int)((double)j*(C-1)/27.0 + 0.5); if (sj<0) sj=0; if (sj>C-1) sj=C-1;
             norm[i][j] = img[si][sj];
         }
     }
-    auto f = nr_heur::compute_feat(norm);
+    nr_heur::Feat f = nr_heur::compute_feat(norm);
     int ans = nr_heur::classify(f);
     if (ans<0 || ans>9) ans = 0;
     return ans;
